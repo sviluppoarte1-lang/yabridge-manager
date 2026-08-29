@@ -1,0 +1,191 @@
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+use super::system::{find_yabridgectl, YabridgeInstall};
+
+#[derive(Debug, Clone)]
+pub struct YabridgeConfig {
+    pub install: Option<YabridgeInstall>,
+    pub plugin_dirs: Vec<PathBuf>,
+    pub is_synced: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncResult {
+    pub success: bool,
+    pub plugins_found: usize,
+    pub plugins_synced: usize,
+    pub errors: Vec<String>,
+    pub output: String,
+}
+
+pub fn get_config() -> YabridgeConfig {
+    let install = super::system::find_yabridge_install();
+    let plugin_dirs = get_plugin_dirs();
+    let is_synced = check_if_synced();
+
+    YabridgeConfig {
+        install,
+        plugin_dirs,
+        is_synced,
+    }
+}
+
+pub fn get_plugin_dirs() -> Vec<PathBuf> {
+    let yabridgectl = match find_yabridgectl() {
+        Some(p) => p,
+        None => return default_plugin_dirs(),
+    };
+
+    let output = Command::new(&yabridgectl)
+        .arg("status")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+
+    let mut dirs = Vec::new();
+    for line in output.lines() {
+        if let Some(path_str) = line.strip_prefix("  Plugin directories:").or_else(|| {
+            if line.starts_with('/') || line.starts_with("    ") {
+                Some(line.trim())
+            } else {
+                None
+            }
+        }) {
+            let path = PathBuf::from(path_str.trim());
+            if path.exists() {
+                dirs.push(path);
+            }
+        }
+    }
+
+    if dirs.is_empty() {
+        default_plugin_dirs()
+    } else {
+        dirs
+    }
+}
+
+pub fn default_plugin_dirs() -> Vec<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_default();
+    vec![
+        home.join(".wine/drive_c/Program Files/Common Files/VST2"),
+        home.join(".wine/drive_c/Program Files/Common Files/VST3"),
+        home.join(".wine/drive_c/Program Files/VSTPlugins"),
+        home.join(".wine/drive_c/Program Files/Steinberg/VSTPlugins"),
+        home.join(".wine/drive_c/Program Files/Cakewalk/VST Plugins"),
+    ]
+}
+
+fn check_if_synced() -> bool {
+    let install = match super::system::find_yabridge_install() {
+        Some(i) => i,
+        None => return false,
+    };
+    install.host_exe.exists() && install.lib_vst2.exists()
+}
+
+pub fn run_sync(wine_bin: &PathBuf) -> Result<SyncResult> {
+    let yabridgectl = find_yabridgectl()
+        .context("yabridgectl not found. Is yabridge installed?")?;
+
+    let output = Command::new(&yabridgectl)
+        .arg("sync")
+        .env("PATH", format!("{}:{}", wine_bin.parent().unwrap().to_string_lossy(), std::env::var("PATH").unwrap_or_default()))
+        .output()
+        .context("Failed to run yabridgectl sync")?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}\n{}", stdout, stderr);
+
+    let plugins_found = combined
+        .lines()
+        .filter(|l| l.contains("plugin") || l.contains("VST"))
+        .count();
+
+    let errors: Vec<String> = combined
+        .lines()
+        .filter(|l| l.contains("error") || l.contains("Error") || l.contains("failed"))
+        .map(|l| l.trim().to_string())
+        .collect();
+
+    Ok(SyncResult {
+        success: output.status.success(),
+        plugins_found,
+        plugins_synced: if output.status.success() { plugins_found } else { 0 },
+        errors,
+        output: combined,
+    })
+}
+
+pub fn setup_wine_prefix_for_yabridge(
+    wine_bin: &PathBuf,
+    prefix: &PathBuf,
+) -> Result<()> {
+    let yabridgectl = find_yabridgectl()
+        .context("yabridgectl not found")?;
+
+    Command::new(&yabridgectl)
+        .arg("setup")
+        .arg("--wine-prefix")
+        .arg(prefix)
+        .env("PATH", format!("{}:{}", wine_bin.parent().unwrap().to_string_lossy(), std::env::var("PATH").unwrap_or_default()))
+        .output()
+        .context("Failed to run yabridgectl setup")?;
+
+    Ok(())
+}
+
+pub fn copy_binaries(data_dir: &PathBuf, build_dir: &PathBuf) -> Result<()> {
+    fs::create_dir_all(data_dir)?;
+
+    let files = vec![
+        "yabridge-host.exe",
+        "yabridge-host.exe.so",
+        "yabridgectl",
+        "libyabridge-vst2.so",
+        "libyabridge-vst3.so",
+        "libyabridge-clap.so",
+        "libyabridge-chainloader-vst2.so",
+        "libyabridge-chainloader-vst3.so",
+        "libyabridge-chainloader-clap.so",
+    ];
+
+    let mut copied = 0;
+
+    for file in &files {
+        let src_path = build_dir.join(file);
+        let dst_path = data_dir.join(file);
+
+        if src_path.exists() {
+            fs::copy(&src_path, &dst_path)
+                .with_context(|| format!("Failed to copy {}", file))?;
+            copied += 1;
+        }
+    }
+
+    if copied == 0 {
+        anyhow::bail!("No files found in {}", build_dir.display())
+    }
+
+    Ok(())
+}
+
+pub fn find_bundled_yabridge_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+
+    let candidates = vec![
+        exe_dir.join("../share/yabridge-manager/yabridge"),
+        exe_dir.join("../share/yabridge"),
+        exe_dir.join("bundled/yabridge"),
+    ];
+
+    candidates.into_iter().find(|p| {
+        p.join("yabridge-host.exe").exists()
+            && p.join("libyabridge-vst2.so").exists()
+    })
+}
