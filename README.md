@@ -144,6 +144,13 @@ yabridge-manager/
 
 GPL-3.0-or-later
 
+## Source Code
+
+| Repository | Description |
+|------------|-------------|
+| [yabridge-manager](https://github.com/sviluppoarte1-lang/yabridge-manager) | GUI manager (this repo) |
+| [yabridge-wayland](https://github.com/sviluppoarte1-lang/yabridge-wayland) | Modified yabridge fork with Wine 11.16 + Wayland support |
+
 ## Acknowledgments
 
 - [yabridge](https://github.com/robbert-vdh/yabridge) by Robbert van der Helm — the original Wine plugin bridge
