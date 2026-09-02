@@ -73,7 +73,7 @@ fi
 # Build AppImage
 ARCH=$(uname -m)
 OUTPUT="${APP_NAME}-${VERSION}-${ARCH}.AppImage"
-ARCH=$ARCH "$APPIMAGETOOL" "$APPDIR" "$OUTPUT"
+ARCH=$ARCH APPIMAGE_EXTRACT_AND_RUN=1 "$APPIMAGETOOL" "$APPDIR" "$OUTPUT"
 
 echo "=== Done: $OUTPUT ==="
 echo "Total size:"

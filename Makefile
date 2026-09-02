@@ -7,7 +7,7 @@ deb: build
 	bash packaging/deb/build.sh
 
 appimage: build
-	bash packaging/appimage/build.sh
+	APPIMAGE_EXTRACT_AND_RUN=1 bash packaging/appimage/build.sh
 
 clean:
 	cargo clean
