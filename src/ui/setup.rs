@@ -13,6 +13,7 @@ pub struct SetupPage {
     pub is_working: bool,
     pub progress: f32,
     pub wine_version_to_install: String,
+    pub update_available: Option<bool>,
 }
 
 impl SetupPage {
@@ -28,6 +29,7 @@ impl SetupPage {
         self.wine_installs = system::find_wine_installations();
         self.yabridge_install = system::find_yabridge_install();
         self.wine_install = self.wine_installs.first().cloned();
+        self.update_available = yabridge::needs_update();
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
@@ -181,6 +183,32 @@ impl SetupPage {
                     });
 
                     ui.add_space(8.0);
+
+                    if self.update_available == Some(true) {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(255, 200, 50),
+                                "Update available",
+                            );
+                            if ui.button("Update yabridge").clicked() && !self.is_working {
+                                self.is_working = true;
+                                self.is_error = false;
+                                self.status_message = "Updating yabridge...".to_string();
+                                std::thread::spawn(move || {
+                                    let result = yabridge::update_installed_binaries();
+                                    match result {
+                                        Ok(msg) => {
+                                            eprintln!("{}", msg);
+                                        }
+                                        Err(e) => {
+                                            eprintln!("Failed to update yabridge: {}", e);
+                                        }
+                                    }
+                                });
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
 
                     ui.horizontal(|ui| {
                         if ui.button("Sync Plugins").clicked() && !self.is_working {

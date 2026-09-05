@@ -189,3 +189,38 @@ pub fn find_bundled_yabridge_dir() -> Option<PathBuf> {
             && p.join("libyabridge-vst2.so").exists()
     })
 }
+
+pub fn needs_update() -> Option<bool> {
+    let bundled = find_bundled_yabridge_dir()?;
+    let data_dir = dirs::home_dir()?.join(".local/share/yabridge");
+
+    let bundled_bin = bundled.join("yabridge-host.exe.so");
+    let installed_bin = data_dir.join("yabridge-host.exe.so");
+
+    if !installed_bin.exists() {
+        return Some(true);
+    }
+
+    let bundled_meta = fs::metadata(&bundled_bin).ok()?;
+    let installed_meta = fs::metadata(&installed_bin).ok()?;
+
+    let bundled_time = bundled_meta.modified().ok()?;
+    let installed_time = installed_meta.modified().ok()?;
+
+    Some(bundled_time > installed_time)
+}
+
+pub fn update_installed_binaries() -> Result<String> {
+    let bundled = find_bundled_yabridge_dir()
+        .context("Bundled yabridge binaries not found")?;
+    let data_dir = dirs::home_dir()
+        .context("Cannot determine home directory")?
+        .join(".local/share/yabridge");
+
+    copy_binaries(&data_dir, &bundled)?;
+
+    Ok(format!(
+        "yabridge updated successfully in {}",
+        data_dir.display()
+    ))
+}
