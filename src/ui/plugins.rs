@@ -1,3 +1,5 @@
+use std::sync::mpsc::Receiver;
+
 use eframe::egui;
 use crate::backend::plugin::{self, Plugin, PluginFormat, PluginScanResult};
 
@@ -9,6 +11,7 @@ pub struct PluginsPage {
     pub selected_plugin: Option<usize>,
     pub scan_dirs: Vec<std::path::PathBuf>,
     pub is_scanning: bool,
+    scan_rx: Option<Receiver<PluginScanResult>>,
 }
 
 impl PluginsPage {
@@ -22,6 +25,32 @@ impl PluginsPage {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         ui.heading("Plugin Manager");
         ui.separator();
+
+        // Pick up a finished background scan without blocking the UI.
+        if self.scan_rx.is_some() {
+            ui.ctx().request_repaint();
+        }
+        let mut finished: Option<PluginScanResult> = None;
+        let mut scan_ended = false;
+        if let Some(rx) = &self.scan_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    finished = Some(result);
+                    scan_ended = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    scan_ended = true;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if scan_ended {
+            self.scan_rx = None;
+            self.is_scanning = false;
+            if let Some(result) = finished {
+                self.scan_result = Some(result);
+            }
+        }
 
         self.show_toolbar(ui);
         ui.add_space(8.0);
@@ -55,9 +84,11 @@ impl PluginsPage {
             if ui.button("Scan Plugins").clicked() && !self.is_scanning {
                 self.is_scanning = true;
                 let dirs = self.scan_dirs.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.scan_rx = Some(rx);
                 std::thread::spawn(move || {
                     let result = plugin::scan_plugins(&dirs);
-                    eprintln!("Found {} plugins", result.plugins.len());
+                    let _ = tx.send(result);
                 });
             }
 

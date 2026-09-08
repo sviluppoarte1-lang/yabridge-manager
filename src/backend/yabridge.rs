@@ -190,6 +190,83 @@ pub fn find_bundled_yabridge_dir() -> Option<PathBuf> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn unique_tmp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "yabridge-test-{}-{}",
+            name,
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn copy_binaries_copies_all_files() {
+        let src = unique_tmp("src");
+        let dst = unique_tmp("dst");
+        let files = [
+            "yabridge-host.exe",
+            "yabridge-host.exe.so",
+            "yabridgectl",
+            "libyabridge-vst2.so",
+            "libyabridge-vst3.so",
+            "libyabridge-clap.so",
+            "libyabridge-chainloader-vst2.so",
+            "libyabridge-chainloader-vst3.so",
+            "libyabridge-chainloader-clap.so",
+        ];
+        for f in &files {
+            fs::write(src.join(f), format!("contents-of-{}", f)).unwrap();
+        }
+
+        copy_binaries(&dst, &src).unwrap();
+
+        for f in &files {
+            let content = fs::read_to_string(dst.join(f)).unwrap();
+            assert_eq!(content, format!("contents-of-{}", f));
+        }
+
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&dst).ok();
+    }
+
+    #[test]
+    fn copy_binaries_errors_on_empty_source() {
+        let src = unique_tmp("empty");
+        let dst = unique_tmp("dst2");
+        assert!(copy_binaries(&dst, &src).is_err());
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&dst).ok();
+    }
+
+    #[test]
+    fn copy_binaries_overwrites_older_files() {
+        let src = unique_tmp("new");
+        let dst = unique_tmp("old");
+        fs::write(src.join("yabridge-host.exe.so"), "new-binary").unwrap();
+        fs::write(src.join("yabridge-host.exe"), "new-exe").unwrap();
+        fs::write(dst.join("yabridge-host.exe.so"), "old-binary").unwrap();
+
+        copy_binaries(&dst, &src).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dst.join("yabridge-host.exe.so")).unwrap(),
+            "new-binary"
+        );
+
+        fs::remove_dir_all(&src).ok();
+        fs::remove_dir_all(&dst).ok();
+    }
+}
+
 pub fn needs_update() -> Option<bool> {
     let bundled = find_bundled_yabridge_dir()?;
     let data_dir = dirs::home_dir()?.join(".local/share/yabridge");

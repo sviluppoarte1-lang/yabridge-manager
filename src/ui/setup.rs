@@ -1,5 +1,13 @@
+use std::sync::mpsc::Receiver;
+
 use eframe::egui;
 use crate::backend::{system, wine, yabridge};
+
+/// Result of a background task, sent back to the UI thread.
+pub struct BgTaskResult {
+    pub message: String,
+    pub is_error: bool,
+}
 
 #[derive(Default)]
 pub struct SetupPage {
@@ -14,6 +22,7 @@ pub struct SetupPage {
     pub progress: f32,
     pub wine_version_to_install: String,
     pub update_available: Option<bool>,
+    bg_result_rx: Option<Receiver<BgTaskResult>>,
 }
 
 impl SetupPage {
@@ -32,6 +41,51 @@ impl SetupPage {
         self.update_available = yabridge::needs_update();
     }
 
+    /// Check for a finished background task (non-blocking) and apply its
+    /// result to the UI state.
+    fn poll_bg_tasks(&mut self) {
+        let done = match &self.bg_result_rx {
+            Some(rx) => match rx.try_recv() {
+                Ok(res) => {
+                    self.is_working = false;
+                    self.is_error = res.is_error;
+                    self.status_message = res.message;
+                    true
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.is_working = false;
+                    self.is_error = true;
+                    self.status_message =
+                        "Background task ended unexpectedly.".to_string();
+                    true
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            },
+            None => false,
+        };
+        if done {
+            self.bg_result_rx = None;
+            self.refresh();
+        }
+    }
+
+    /// Run `task` on a worker thread. The UI stays responsive and `poll_bg_tasks`
+    /// picks up the result when done (unblocks buttons, shows the message).
+    fn run_bg(
+        &mut self,
+        start_msg: &str,
+        task: impl FnOnce() -> BgTaskResult + Send + 'static,
+    ) {
+        self.is_working = true;
+        self.is_error = false;
+        self.status_message = start_msg.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.bg_result_rx = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(task());
+        });
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui) {
         ui.heading("Setup & Installation");
         ui.separator();
@@ -39,6 +93,13 @@ impl SetupPage {
         if self.system_info.is_none() {
             self.refresh();
         }
+
+        // Keep repainting while a background task runs so its result is
+        // picked up as soon as it finishes, then apply it.
+        if self.bg_result_rx.is_some() {
+            ui.ctx().request_repaint();
+        }
+        self.poll_bg_tasks();
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             self.show_system_info(ui);
@@ -106,26 +167,31 @@ impl SetupPage {
                 });
 
                 if ui.button("Download & Install Wine").clicked() && !self.is_working {
-                    self.is_working = true;
-                    self.status_message = "Starting download...".to_string();
                     let version = self.wine_version_to_install.clone();
                     let install_dir = dirs::home_dir()
                         .unwrap_or_default()
                         .join(format!(".local/share/yabridge/wine-{}", version));
 
-                    std::thread::spawn(move || {
-                        let result = wine::download_and_install_wine(
+                    self.run_bg("Starting download...", move || {
+                        match wine::download_and_install_wine(
                             &version,
                             &install_dir,
                             None,
-                        );
-                        match result {
-                            Ok(_) => {
-                                eprintln!("Wine installed successfully");
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to install Wine: {}", e);
-                            }
+                        ) {
+                            Ok(_) => BgTaskResult {
+                                message: format!(
+                                    "Wine {} installed successfully.",
+                                    version
+                                ),
+                                is_error: false,
+                            },
+                            Err(e) => BgTaskResult {
+                                message: format!(
+                                    "Failed to install Wine: {:#}",
+                                    e
+                                ),
+                                is_error: true,
+                            },
                         }
                     });
                 }
@@ -191,18 +257,19 @@ impl SetupPage {
                                 "Update available",
                             );
                             if ui.button("Update yabridge").clicked() && !self.is_working {
-                                self.is_working = true;
-                                self.is_error = false;
-                                self.status_message = "Updating yabridge...".to_string();
-                                std::thread::spawn(move || {
-                                    let result = yabridge::update_installed_binaries();
-                                    match result {
-                                        Ok(msg) => {
-                                            eprintln!("{}", msg);
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to update yabridge: {}", e);
-                                        }
+                                self.run_bg("Updating yabridge...", || {
+                                    match yabridge::update_installed_binaries() {
+                                        Ok(msg) => BgTaskResult {
+                                            message: msg,
+                                            is_error: false,
+                                        },
+                                        Err(e) => BgTaskResult {
+                                            message: format!(
+                                                "Failed to update yabridge: {:#}",
+                                                e
+                                            ),
+                                            is_error: true,
+                                        },
                                     }
                                 });
                             }
@@ -212,21 +279,35 @@ impl SetupPage {
 
                     ui.horizontal(|ui| {
                         if ui.button("Sync Plugins").clicked() && !self.is_working {
-                            self.is_working = true;
-                            self.status_message = "Syncing plugins...".to_string();
-
-                            if let Some(ref wine) = self.wine_install {
-                                let wine_bin = wine.path.join("wine");
-                                std::thread::spawn(move || {
-                                    match yabridge::run_sync(&wine_bin) {
-                                        Ok(result) => {
-                                            eprintln!("Sync result: {}", result.output);
+                            match self.wine_install.clone() {
+                                Some(wine_install) => {
+                                    let wine_bin = wine_install.path.join("wine");
+                                    self.run_bg("Syncing plugins...", move || {
+                                        match yabridge::run_sync(&wine_bin) {
+                                            Ok(result) => BgTaskResult {
+                                                message: format!(
+                                                    "Sync finished: {} plugins found/synced.\n{}",
+                                                    result.plugins_synced,
+                                                    result.output
+                                                ),
+                                                is_error: !result.success,
+                                            },
+                                            Err(e) => BgTaskResult {
+                                                message: format!(
+                                                    "Sync failed: {:#}",
+                                                    e
+                                                ),
+                                                is_error: true,
+                                            },
                                         }
-                                        Err(e) => {
-                                            eprintln!("Sync failed: {}", e);
-                                        }
-                                    }
-                                });
+                                    });
+                                }
+                                None => {
+                                    self.is_error = true;
+                                    self.status_message =
+                                        "No Wine installation selected, cannot sync."
+                                            .to_string();
+                                }
                             }
                         }
 
@@ -248,22 +329,26 @@ impl SetupPage {
                             if ui.button("Install yabridge (custom build)").clicked()
                                 && !self.is_working
                             {
-                                self.is_working = true;
-                                self.is_error = false;
-                                self.status_message = "Installing yabridge...".to_string();
                                 let data_dir = dirs::home_dir()
                                     .unwrap_or_default()
                                     .join(".local/share/yabridge");
                                 let build_dir = path.clone();
-                                std::thread::spawn(move || {
-                                    let result = yabridge::copy_binaries(&data_dir, &build_dir);
-                                    match result {
-                                        Ok(_) => {
-                                            eprintln!("yabridge installed successfully");
-                                        }
-                                        Err(e) => {
-                                            eprintln!("Failed to install yabridge: {}", e);
-                                        }
+                                self.run_bg("Installing yabridge...", move || {
+                                    match yabridge::copy_binaries(&data_dir, &build_dir) {
+                                        Ok(_) => BgTaskResult {
+                                            message: format!(
+                                                "yabridge installed successfully in {}.",
+                                                data_dir.display()
+                                            ),
+                                            is_error: false,
+                                        },
+                                        Err(e) => BgTaskResult {
+                                            message: format!(
+                                                "Failed to install yabridge: {:#}",
+                                                e
+                                            ),
+                                            is_error: true,
+                                        },
                                     }
                                 });
                             }
